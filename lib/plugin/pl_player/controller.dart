@@ -166,6 +166,14 @@ class PlPlayerController with BlockConfigMixin {
   StreamSubscription<Duration>? _subForSeek;
 
   Box setting = GStorage.setting;
+  bool _enableCustomSkip = false;
+
+  @override
+  bool get enableCustomSkip => _enableCustomSkip;
+
+  void setEnableCustomSkip(bool value) {
+    _enableCustomSkip = value;
+  }
 
   // final Durations durations;
 
@@ -703,9 +711,7 @@ class PlPlayerController with BlockConfigMixin {
 
   Future<Player> _initPlayer() async {
     assert(_videoPlayerController == null);
-    final opt = {
-      'video-sync': Pref.videoSync,
-    };
+    final opt = {'video-sync': Pref.videoSync};
     if (Platform.isAndroid) {
       opt['volume-max'] = '100';
       opt['ao'] = Pref.audioOutput;
@@ -738,10 +744,7 @@ class PlPlayerController with BlockConfigMixin {
       ),
     );
 
-    player.setMediaHeader(
-      userAgent: BrowserUa.pc,
-      referer: HttpString.baseUrl,
-    );
+    player.setMediaHeader(userAgent: BrowserUa.pc, referer: HttpString.baseUrl);
     // await player.setAudioTrack(.auto());
 
     _startListeners(player);
@@ -798,14 +801,10 @@ class PlPlayerController with BlockConfigMixin {
         audioNormalization = audioNormalization.replaceFirstMapped(
           loudnormRegExp,
           (i) =>
-              'loudnorm=${volume.format(
-                Map.fromEntries(
-                  i.group(1)!.split(':').map((item) {
-                    final parts = item.split('=');
-                    return MapEntry(parts[0].toLowerCase(), num.parse(parts[1]));
-                  }),
-                ),
-              )}',
+              'loudnorm=${volume.format(Map.fromEntries(i.group(1)!.split(':').map((item) {
+                final parts = item.split('=');
+                return MapEntry(parts[0].toLowerCase(), num.parse(parts[1]));
+              })))}',
         );
       } else {
         audioNormalization = audioNormalization.replaceFirst(
@@ -819,11 +818,7 @@ class PlPlayerController with BlockConfigMixin {
     }
 
     await player.open(
-      Media(
-        video,
-        start: seekTo,
-        extras: extras.isEmpty ? null : extras,
-      ),
+      Media(video, start: seekTo, extras: extras.isEmpty ? null : extras),
       play: false,
     );
   }

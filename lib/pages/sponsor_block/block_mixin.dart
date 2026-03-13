@@ -20,9 +20,11 @@ import 'package:media_kit/media_kit.dart';
 
 mixin BlockConfigMixin {
   late final pgcSkipType = Pref.pgcSkipType;
-  late final enablePgcSkip = pgcSkipType != SkipType.disable;
+  bool get enablePgcSkip => pgcSkipType != SkipType.disable;
   late final enableSponsorBlock = Pref.enableSponsorBlock;
-  late final enableBlock = enableSponsorBlock || enablePgcSkip;
+  bool get enableCustomSkip => false;
+  bool get enableBlock =>
+      enableSponsorBlock || enablePgcSkip || enableCustomSkip;
   late final blockColor = Pref.blockColor;
   late final blockLimit = Pref.blockLimit;
   late final blockSettings = Pref.blockSettings;
@@ -57,15 +59,21 @@ mixin BlockMixin on GetxController {
   bool get isUgc;
   late final isBlock = isUgc || !blockConfig.enablePgcSkip;
 
+  void onSegmentsLoaded(List<SegmentItemModel> list) {}
+
+  bool allowSegmentItem(SegmentItemModel item) => true;
+
   Future<void> querySponsorBlock({
     required String bvid,
     required int cid,
   }) async {
     resetBlock();
+    onSegmentsLoaded(const <SegmentItemModel>[]);
 
     final result = await SponsorBlock.getSkipSegments(bvid: bvid, cid: cid);
     switch (result) {
       case Success<List<SegmentItemModel>>(:final response):
+        onSegmentsLoaded(response);
         handleSBData(response);
       case Error(:final code) when code != 404:
         if (kDebugMode) {
@@ -117,85 +125,100 @@ mixin BlockMixin on GetxController {
   Future<void> handleSBData(List<SegmentItemModel> list) async {
     if (list.isNotEmpty) {
       try {
-        Future<void>? future;
         final duration = list.first.videoDuration ?? timeLength!;
-        // segmentList
-        _segmentList.addAll(
-          list
-              .where(
-                (item) =>
-                    blockConfig.enableList.contains(item.category) &&
-                    item.segment[1] >= item.segment[0],
-              )
-              .map(
-                (item) {
-                  final segmentModel = SegmentModel.fromItemModel(
-                    item,
-                    isBlock ? blockConfig : null,
-                  );
-                  if (segmentModel.segment == const (0, 0)) {
-                    videoLabel?.value +=
-                        '${videoLabel!.value.isNotEmpty ? '/' : ''}${segmentModel.segmentType.title}';
-                  }
-
-                  if (_blockListener == null && autoPlay && player != null) {
-                    final currPos = currPosInMilliseconds;
-
-                    if (segmentModel.segment.contains(currPos)) {
-                      _lastBlockPos = currPos;
-
-                      switch (segmentModel.skipType) {
-                        case SkipType.alwaysSkip:
-                        case SkipType.skipOnce:
-                          segmentModel.hasSkipped = true;
-                          if (player!.state.playing) {
-                            future = onSkip(
-                              segmentModel,
-                            );
-                          } else {
-                            player!.stream.playing.firstWhere((e) {
-                              if (e) {
-                                future = onSkip(segmentModel);
-                                return true;
-                              }
-                              return false;
-                            }, orElse: () => false);
-                          }
-                          break;
-                        case SkipType.skipManually:
-                          onAddItem(segmentModel);
-                          break;
-                        default:
-                          break;
-                      }
-                    }
-                  }
-
-                  return segmentModel;
-                },
-              ),
-        );
-
-        // _segmentProgressList
-        segmentProgressList.addAll(
-          _segmentList.map((e) {
-            double start = (e.segment.$1 / duration).clamp(0.0, 1.0);
-            double end = (e.segment.$2 / duration).clamp(0.0, 1.0);
-            return Segment(
-              start: start,
-              end: end,
-              color: blockConfig._getColor(e.segmentType),
-            );
-          }),
-        );
-
-        if (_blockListener == null && (autoPlay || preInitPlayer)) {
-          await future;
-          initSkip();
-        }
+        final segments = list
+            .where(
+              (item) =>
+                  allowSegmentItem(item) &&
+                  blockConfig.enableList.contains(item.category) &&
+                  item.segment[1] >= item.segment[0],
+            )
+            .map((item) {
+              final segmentModel = SegmentModel.fromItemModel(
+                item,
+                isBlock ? blockConfig : null,
+              );
+              if (segmentModel.segment == const (0, 0)) {
+                videoLabel?.value +=
+                    '${videoLabel!.value.isNotEmpty ? '/' : ''}${segmentModel.segmentType.title}';
+              }
+              return segmentModel;
+            })
+            .toList();
+        await _handleSegments(segments, duration: duration);
       } catch (e) {
         if (kDebugMode) debugPrint('failed to parse sponsorblock: $e');
       }
+    }
+  }
+
+  Future<void> handleCustomSegments(
+    List<SegmentModel> list, {
+    required num duration,
+  }) async {
+    if (list.isEmpty) return;
+    try {
+      await _handleSegments(list, duration: duration);
+    } catch (e) {
+      if (kDebugMode) debugPrint('failed to parse custom segments: $e');
+    }
+  }
+
+  Future<void> _handleSegments(
+    List<SegmentModel> segments, {
+    required num duration,
+  }) async {
+    if (segments.isEmpty) return;
+    Future<void>? future;
+    _segmentList.addAll(segments);
+
+    if (_blockListener == null && autoPlay && player != null) {
+      final currPos = currPosInMilliseconds;
+      for (final segmentModel in segments) {
+        if (!segmentModel.segment.contains(currPos)) {
+          continue;
+        }
+        _lastBlockPos = currPos;
+        switch (segmentModel.skipType) {
+          case SkipType.alwaysSkip:
+          case SkipType.skipOnce:
+            segmentModel.hasSkipped = true;
+            if (player!.state.playing) {
+              future = onSkip(segmentModel);
+            } else {
+              player!.stream.playing.firstWhere((e) {
+                if (e) {
+                  future = onSkip(segmentModel);
+                  return true;
+                }
+                return false;
+              }, orElse: () => false);
+            }
+            break;
+          case SkipType.skipManually:
+            onAddItem(segmentModel);
+            break;
+          default:
+            break;
+        }
+      }
+    }
+
+    segmentProgressList.addAll(
+      segments.map((e) {
+        double start = (e.segment.$1 / duration).clamp(0.0, 1.0);
+        double end = (e.segment.$2 / duration).clamp(0.0, 1.0);
+        return Segment(
+          start: start,
+          end: end,
+          color: blockConfig._getColor(e.segmentType),
+        );
+      }),
+    );
+
+    if (_blockListener == null && (autoPlay || preInitPlayer)) {
+      await future;
+      initSkip();
     }
   }
 
@@ -245,7 +268,7 @@ mixin BlockMixin on GetxController {
     if (autoPlay && Pref.blockToast) {
       _showBlockToast('已跳过${item.segmentType.shortTitle}片段');
     }
-    if (isBlock && Pref.blockTrack) {
+    if (isBlock && Pref.blockTrack && item.uuid.isNotEmpty) {
       SponsorBlock.viewedVideoSponsorTime(item.uuid);
     }
   }
@@ -256,10 +279,7 @@ mixin BlockMixin on GetxController {
     bool isSeek = true,
   }) async {
     try {
-      await seekTo(
-        Duration(milliseconds: item.segment.$2),
-        isSeek: isSeek,
-      );
+      await seekTo(Duration(milliseconds: item.segment.$2), isSeek: isSeek);
       if (isSkip) {
         _skipToast(item);
       } else {
@@ -397,7 +417,7 @@ mixin BlockMixin on GetxController {
                   (item) => ListTile(
                     onTap: () {
                       Get.back();
-                      if (isBlock) {
+                      if (isBlock && item.uuid.isNotEmpty) {
                         _showVoteDialog(item);
                       }
                     },

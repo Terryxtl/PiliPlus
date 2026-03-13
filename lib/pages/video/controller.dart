@@ -1,6 +1,6 @@
 import 'dart:async';
 import 'dart:io';
-import 'dart:math' show min;
+import 'dart:math' show max, min;
 import 'dart:ui';
 
 import 'package:PiliPlus/common/constants.dart';
@@ -19,6 +19,7 @@ import 'package:PiliPlus/models/common/sponsor_block/action_type.dart';
 import 'package:PiliPlus/models/common/sponsor_block/post_segment_model.dart';
 import 'package:PiliPlus/models/common/sponsor_block/segment_model.dart';
 import 'package:PiliPlus/models/common/sponsor_block/segment_type.dart';
+import 'package:PiliPlus/models/common/sponsor_block/skip_type.dart';
 import 'package:PiliPlus/models/common/video/audio_quality.dart';
 import 'package:PiliPlus/models/common/video/source_type.dart';
 import 'package:PiliPlus/models/common/video/subtitle_pref_type.dart';
@@ -29,6 +30,7 @@ import 'package:PiliPlus/models/video/play/url.dart';
 import 'package:PiliPlus/models_new/download/bili_download_entry_info.dart';
 import 'package:PiliPlus/models_new/media_list/media_list.dart';
 import 'package:PiliPlus/models_new/pgc/pgc_info_model/result.dart';
+import 'package:PiliPlus/models_new/sponsor_block/segment_item.dart';
 import 'package:PiliPlus/models_new/video/video_detail/data.dart';
 import 'package:PiliPlus/models_new/video/video_detail/episode.dart' as ugc;
 import 'package:PiliPlus/models_new/video/video_detail/page.dart';
@@ -37,6 +39,7 @@ import 'package:PiliPlus/models_new/video/video_play_info/subtitle.dart';
 import 'package:PiliPlus/models_new/video/video_stein_edgeinfo/data.dart';
 import 'package:PiliPlus/pages/audio/view.dart';
 import 'package:PiliPlus/pages/common/publish/publish_route.dart';
+import 'package:PiliPlus/pages/setting/widgets/dual_slider_dialog.dart';
 import 'package:PiliPlus/pages/search/widgets/search_text.dart';
 import 'package:PiliPlus/pages/sponsor_block/block_mixin.dart';
 import 'package:PiliPlus/pages/video/download_panel/view.dart';
@@ -62,6 +65,7 @@ import 'package:PiliPlus/utils/page_utils.dart';
 import 'package:PiliPlus/utils/path_utils.dart';
 import 'package:PiliPlus/utils/platform_utils.dart';
 import 'package:PiliPlus/utils/storage.dart';
+import 'package:PiliPlus/utils/storage_key.dart';
 import 'package:PiliPlus/utils/storage_pref.dart';
 import 'package:PiliPlus/utils/utils.dart';
 import 'package:PiliPlus/utils/video_utils.dart';
@@ -270,6 +274,7 @@ class VideoDetailController extends GetxController
   }
 
   bool imageview = false;
+  List<SegmentItemModel>? _cachedRemoteSegments;
 
   final isLoginVideo = Accounts.get(AccountType.video).isLogin;
 
@@ -458,10 +463,7 @@ class VideoDetailController extends GetxController
         PageUtils.showVideoBottomSheet(
           context,
           child: plPlayerController.darkVideoPage && MyApp.darkThemeData != null
-              ? Theme(
-                  data: MyApp.darkThemeData!,
-                  child: panel(),
-                )
+              ? Theme(data: MyApp.darkThemeData!, child: panel())
               : panel(),
           isFullScreen: () => plPlayerController.isFullScreen.value,
         );
@@ -491,6 +493,20 @@ class VideoDetailController extends GetxController
   @override
   BlockConfigMixin get blockConfig => plPlayerController;
   @override
+  void onSegmentsLoaded(List<SegmentItemModel> list) {
+    _cachedRemoteSegments = List<SegmentItemModel>.from(list);
+  }
+
+  @override
+  bool allowSegmentItem(SegmentItemModel item) {
+    if (!hasCustomMultiPageSkip || !isUgc) {
+      return true;
+    }
+    return item.category != SegmentType.intro.name &&
+        item.category != SegmentType.outro.name;
+  }
+
+  @override
   Player? get player => plPlayerController.videoPlayerController;
   @override
   bool get isFullScreen => plPlayerController.isFullScreen.value;
@@ -506,6 +522,175 @@ class VideoDetailController extends GetxController
   Future<void> seekTo(Duration duration, {required bool isSeek}) =>
       plPlayerController.seekTo(duration, isSeek: isSeek);
 
+  Map<String, List<int>> get _multiPageSkipConfigMap {
+    final raw = GStorage.localCache.get(LocalCacheKey.multiPageSkipConfig);
+    if (raw is! Map) {
+      return {};
+    }
+    final result = <String, List<int>>{};
+    raw.forEach((key, value) {
+      if (key == null || value is! List) {
+        return;
+      }
+      final intro = _normalizeSkipSeconds(value.elementAtOrNull(0));
+      final outro = _normalizeSkipSeconds(value.elementAtOrNull(1));
+      if (intro > 0 || outro > 0) {
+        result[key.toString()] = [intro, outro];
+      }
+    });
+    return result;
+  }
+
+  int _normalizeSkipSeconds(Object? value) {
+    if (value is num) {
+      return value.round().clamp(0, 24 * 60 * 60) as int;
+    }
+    if (value is String) {
+      return (int.tryParse(value)?.clamp(0, 24 * 60 * 60) as int?) ?? 0;
+    }
+    return 0;
+  }
+
+  ({int introSeconds, int outroSeconds}) get multiPageSkipConfig {
+    final value = _multiPageSkipConfigMap[bvid];
+    return (
+      introSeconds: value?.elementAtOrNull(0) ?? 0,
+      outroSeconds: value?.elementAtOrNull(1) ?? 0,
+    );
+  }
+
+  bool get hasCustomMultiPageSkip {
+    final config = multiPageSkipConfig;
+    return config.introSeconds > 0 || config.outroSeconds > 0;
+  }
+
+  bool get canEditMultiPageSkip {
+    if (!isUgc || isFileSource) {
+      return false;
+    }
+    if (hasCustomMultiPageSkip) {
+      return true;
+    }
+    try {
+      final introController = Get.find<UgcIntroController>(tag: heroTag);
+      return (introController.videoDetail.value.pages?.length ?? 0) > 1;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  String get multiPageSkipSummary {
+    final config = multiPageSkipConfig;
+    if (!hasCustomMultiPageSkip) {
+      return '未配置';
+    }
+    return '片头 ${config.introSeconds} 秒 / 片尾 ${config.outroSeconds} 秒';
+  }
+
+  void _updateCustomSkipState() {
+    plPlayerController.setEnableCustomSkip(hasCustomMultiPageSkip);
+  }
+
+  List<SegmentModel> _buildCustomMultiPageSegments() {
+    if (!isUgc ||
+        isFileSource ||
+        timeLength == null ||
+        !hasCustomMultiPageSkip) {
+      return const <SegmentModel>[];
+    }
+    final config = multiPageSkipConfig;
+    final duration = timeLength!;
+    final List<SegmentModel> result = <SegmentModel>[];
+    final introMs = min(duration, config.introSeconds * 1000);
+    if (introMs > 0) {
+      result.add(
+        SegmentModel(
+          uuid: '',
+          segmentType: SegmentType.intro,
+          segment: (0, introMs),
+          skipType: SkipType.alwaysSkip,
+        ),
+      );
+    }
+
+    final outroMs = min(duration, config.outroSeconds * 1000);
+    if (outroMs > 0) {
+      final start = max(0, duration - outroMs);
+      if (start < duration) {
+        result.add(
+          SegmentModel(
+            uuid: '',
+            segmentType: SegmentType.outro,
+            segment: (start, duration),
+            skipType: SkipType.alwaysSkip,
+          ),
+        );
+      }
+    }
+    return result;
+  }
+
+  Future<void> refreshSkipSegments() async {
+    resetBlock();
+    if (_cachedRemoteSegments?.isNotEmpty == true) {
+      await handleSBData(_cachedRemoteSegments!);
+    }
+    final customSegments = _buildCustomMultiPageSegments();
+    if (customSegments.isNotEmpty && timeLength != null) {
+      await handleCustomSegments(customSegments, duration: timeLength!);
+    }
+  }
+
+  Future<void> saveMultiPageSkipConfig({
+    required int introSeconds,
+    required int outroSeconds,
+  }) async {
+    if (!isUgc || isFileSource) {
+      return;
+    }
+    final map = _multiPageSkipConfigMap;
+    final normalizedIntro = introSeconds.clamp(0, 24 * 60 * 60) as int;
+    final normalizedOutro = outroSeconds.clamp(0, 24 * 60 * 60) as int;
+    if (normalizedIntro == 0 && normalizedOutro == 0) {
+      map.remove(bvid);
+    } else {
+      map[bvid] = [normalizedIntro, normalizedOutro];
+    }
+    await GStorage.localCache.put(LocalCacheKey.multiPageSkipConfig, map);
+    _updateCustomSkipState();
+    if (!isClosed && timeLength != null) {
+      await refreshSkipSegments();
+    }
+  }
+
+  Future<void> showMultiPageSkipDialog(BuildContext context) async {
+    final config = multiPageSkipConfig;
+    final result = await showDialog<(double, double)>(
+      context: context,
+      builder: (context) => DualSliderDialog(
+        title: '多P片头片尾',
+        description1: '片头跳过时长（0 秒表示不跳过）',
+        description2: '片尾提前结束时长（0 秒表示不跳过）',
+        value1: config.introSeconds.toDouble(),
+        value2: config.outroSeconds.toDouble(),
+        min: 0,
+        max: 600,
+        divisions: 600,
+        suffix: 's',
+        precise: 0,
+      ),
+    );
+    if (result case (final intro, final outro)) {
+      await saveMultiPageSkipConfig(
+        introSeconds: intro.round(),
+        outroSeconds: outro.round(),
+      );
+      SmartDialog.showToast(
+        intro == 0 && outro == 0 ? '已关闭多P片头片尾跳过' : '已保存多P片头片尾跳过',
+      );
+    }
+  }
+
   @override
   Widget buildItem(Object item, Animation<double> animation) {
     final theme = Get.theme;
@@ -513,10 +698,7 @@ class VideoDetailController extends GetxController
       alignment: Alignment.centerLeft,
       child: SlideTransition(
         position: animation.drive(
-          Tween<Offset>(
-            begin: const Offset(-1.0, 0.0),
-            end: Offset.zero,
-          ),
+          Tween<Offset>(begin: const Offset(-1.0, 0.0), end: Offset.zero),
         ),
         child: Padding(
           padding: const EdgeInsets.only(top: 5),
@@ -767,6 +949,7 @@ class VideoDetailController extends GetxController
       return;
     }
     isQuerying = true;
+    _updateCustomSkipState();
     if (plPlayerController.enableSponsorBlock && isBlock && !fromReset) {
       querySponsorBlock(bvid: bvid, cid: cid.value);
     }
@@ -808,9 +991,17 @@ class VideoDetailController extends GetxController
 
       if (!isUgc && !fromReset && plPlayerController.enablePgcSkip) {
         if (data.clipInfoList case final clipInfoList?) {
+          _cachedRemoteSegments = List<SegmentItemModel>.from(clipInfoList);
           resetBlock();
-          handleSBData(clipInfoList);
+          await handleSBData(clipInfoList);
         }
+      }
+
+      if (isUgc && hasCustomMultiPageSkip && data.timeLength != null) {
+        await handleCustomSegments(
+          _buildCustomMultiPageSegments(),
+          duration: data.timeLength!,
+        );
       }
 
       if (data.acceptDesc?.contains('试看') == true) {
@@ -1195,6 +1386,7 @@ class VideoDetailController extends GetxController
 
   @override
   void onClose() {
+    _cachedRemoteSegments = null;
     cid.close();
     if (isFileSource) {
       cacheLocalProgress();
@@ -1216,6 +1408,7 @@ class VideoDetailController extends GetxController
       cacheLocalProgress();
     }
 
+    _cachedRemoteSegments = null;
     playedTime = null;
     defaultST = null;
     videoUrl = null;
@@ -1271,10 +1464,7 @@ class VideoDetailController extends GetxController
     try {
       final res = await Request().get(
         'https://bvc.bilivideo.com/pbp/data',
-        queryParameters: {
-          'bvid': bvid,
-          'cid': cid.value,
-        },
+        queryParameters: {'bvid': bvid, 'cid': cid.value},
       );
       PbpData data = PbpData.fromJson(res.data);
       int stepSec = data.stepSec ?? 0;
@@ -1551,13 +1741,7 @@ class VideoDetailController extends GetxController
       if (kDebugMode) {
         debugPrint(title);
       }
-      Get.toNamed(
-        '/dlna',
-        parameters: {
-          'url': url,
-          'title': ?title,
-        },
-      );
+      Get.toNamed('/dlna', parameters: {'url': url, 'title': ?title});
     } else {
       res.toast();
     }

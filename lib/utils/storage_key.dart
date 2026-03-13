@@ -238,7 +238,8 @@ abstract final class LocalCacheKey {
       danmakuFilterRules = 'danmakuFilterRules',
       mixinKey = 'mixinKey',
       timeStamp = 'timeStamp',
-      buvid = 'buvid';
+      buvid = 'buvid',
+      multiPageSkipConfig = 'multiPageSkipConfig';
 }
 
 abstract final class VideoBoxKey {
